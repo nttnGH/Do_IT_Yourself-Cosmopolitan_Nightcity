@@ -65,7 +65,7 @@ def main():
     with open(log_file, 'w', encoding='utf-8') as lf:
         lf.write("\n".join(combined_logs))
     
-    print("Merge complete. Merged files are saved in the 'res' folder, and the detailed log is available in logFusion.txt.")
+    print("Merge complete. Merged files are saved in the 'res' folder, and the detailed log is available in logFusion.txt!")
 
 if __name__ == "__main__":
     main()
