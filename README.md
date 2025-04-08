@@ -20,6 +20,7 @@ It also automates complex file manipulations such as:
 - Editing **subtitle files** to match custom configurations and applying a **Kiroshi translation effect** on the newly added lines,
 - Cleaning up intermediate files to prepare the project for final mod packaging with external tools like **WolvenKit**.
 
+There are several plugins that allow for further customization of the "CVL extensions," such as the Fusion_CVL_PV plugin, the KiroshiTranslationeffect_forCVL plugin, and the TransVmultilingualvoice_forCVL plugin, among others. More information can be found on the Nexusmods page.
 
 ## 📥 Downloads and Usage
 
