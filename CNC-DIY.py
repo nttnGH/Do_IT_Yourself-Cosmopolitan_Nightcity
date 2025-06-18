@@ -1038,6 +1038,25 @@ class CNCApp(tk.Tk):
                             logging.error(f"Error removing vanillasubtitles folder {vanilla_dir}", exc_info=True)
 
         logging.info("Intermediate files cleanup completed.")
+
+        # Delete the "files" folder once the process is fully complete
+        files_dir = "files"
+        if os.path.exists(files_dir):
+            try:
+                shutil.rmtree(files_dir)
+                logging.info(f"Cdpr's files successfully deleted.")
+            except Exception as e:
+                logging.error(f"Error while deleting the '{files_dir}' folder", exc_info=True)
+
+        # Also delete the "res" folder once the process is fully complete
+        res_dir = "res"
+        if os.path.exists(res_dir):
+            try:
+                shutil.rmtree(res_dir)
+                logging.info(f"Nttn's files successfully deleted.")
+            except Exception as e:
+                logging.error(f"Error while deleting the '{res_dir}' folder", exc_info=True)
+
         self.safe_update_status("Final step")
 
 if __name__ == "__main__":
