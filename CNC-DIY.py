@@ -10,6 +10,8 @@ from logging.handlers import RotatingFileHandler
 import threading
 import re 
 
+
+
 # --- Global Variables ---
 BASE_DIR = "source"
 RES_DIR = "res"
@@ -36,6 +38,49 @@ language_codes = {
     "Traditional Chinese": ("ZH", "zh-tw")
 }
 
+# --- PV Variables ---
+POLYGLOT_LANGS = ["jp", "es", "cn", "kr", "fr", "br"]
+POLYGLOT_LABELS = {
+    "jp": "Japanese",
+    "es": "Spanish",
+    "cn": "Chinese",
+    "kr": "Korean",
+    "fr": "French",
+    "br": "Brazilian"
+}
+
+
+def is_polyglot_key(npc_key: str) -> bool:
+    k = str(npc_key).lower()
+    return k.startswith("polyglotv_") or k.startswith("v_polyglot")
+
+def polyglot_lang_key(npc_key: str):
+    k = str(npc_key).lower()
+    if not is_polyglot_key(k):
+        return None
+    m = re.search(
+        r'^(?:polyglotv_|v_polyglot[_-]?)(spanish|japanese|korean|chinese|french|brazilian|es|jp|kr|cn|fr|br)\b',
+        k
+    )
+    if not m:
+        m = re.search(
+            r'(?:^|[_-])(spanish|japanese|korean|chinese|french|brazilian|es|jp|kr|cn|fr|br)(?:[_-]|$)',
+            k
+        )
+    if not m:
+        return None
+    tag = m.group(1)
+    short2long = {
+        "es": "spanish",
+        "jp": "japanese",
+        "kr": "korean",
+        "cn": "chinese",
+        "fr": "french",
+        "br": "brazilian",
+    }
+    return short2long.get(tag, tag)
+
+
 # --- Helper Functions ---
 def load_json(filepath):
     try:
@@ -52,6 +97,65 @@ def save_json(filepath, data):
     except Exception as e:
         logging.error(f"Failed to save JSON to {filepath}", exc_info=True)
         raise
+
+
+# --- Merge helpers (CNC priority) ---
+def merge_keep_base(base: dict, extra: dict) -> dict:
+    """
+    Union of dictionaries with priority to 'base' (CNC):
+    - Adds only missing keys from 'extra' into 'base'.
+    - Shared keys keep the 'base' value.
+    """
+    if not isinstance(base, dict) or not isinstance(extra, dict):
+        return base
+    for k, v in extra.items():
+        if k not in base:
+            base[k] = v
+    return base
+
+def merge_id_lists_union(base: dict, extra: dict) -> dict:
+    """
+    Union by GLOBAL ID for the mapping NPC -> {"Ids":[...]}:
+    - Build a set of all IDs already present in 'base' (across all NPCs).
+    - For each NPC in 'extra', only add IDs that are absent globally.
+    - If the NPC exists in 'base': extend its 'Ids' list with these new IDs (no duplicates).
+    - If the NPC does not exist: create it with only these new IDs.
+    This ensures CNC keeps precedence for common IDs even when NPC names differ.
+    """
+    if not isinstance(base, dict) or not isinstance(extra, dict):
+        return base
+
+    # Collect all IDs present in base globally
+    present_ids = set()
+    try:
+        for payload in base.values():
+            ids = payload.get("Ids", []) if isinstance(payload, dict) else []
+            for x in ids:
+                present_ids.add(x)
+    except Exception:
+        logging.exception("Failed to scan base id_data for existing IDs")
+
+    for npc, payload in extra.items():
+        try:
+            extra_ids = payload.get("Ids", []) if isinstance(payload, dict) else []
+            to_add = [x for x in extra_ids if x not in present_ids]
+            if not to_add:
+                continue
+            if npc in base and isinstance(base[npc], dict):
+                base_ids = base[npc].setdefault("Ids", [])
+                seen_local = set(base_ids)
+                for x in to_add:
+                    if x not in seen_local:
+                        base_ids.append(x)
+                        seen_local.add(x)
+            else:
+                new_payload = dict(payload) if isinstance(payload, dict) else {}
+                new_payload["Ids"] = to_add
+                base[npc] = new_payload
+            present_ids.update(to_add)
+        except Exception:
+            logging.exception(f"Skipping malformed id_info entry for NPC: {npc}")
+    return base
 
 # --- Main Application ---
 class CNCApp(tk.Tk):
@@ -85,6 +189,23 @@ class CNCApp(tk.Tk):
                 logging.info("CVLPV_npc_info.json loaded and merged successfully.")
             except Exception as e:
                 logging.error("Failed to load CVLPV_npc_info.json", exc_info=True)
+
+        # A first pass to build requirement map; we will rebuild after user toggles Polyglot
+        from collections import defaultdict
+        self.character_order = []
+        self.dependency_map = defaultdict(list)
+        for _key, _info in self.npc_info.items():
+            if not isinstance(_info, dict):
+                self.character_order.append(_key)
+                continue
+            _req = str(_info.get("requirement", "No")).strip()
+            if _req.lower() == "no":
+                self.character_order.append(_key)
+            else:
+                self.dependency_map[_req].append(_key)
+        for _parent, _children in list(self.dependency_map.items()):
+            if _parent not in self.npc_info:
+                logging.warning(f"[requirement] Clé parent inconnue: '{_parent}' pour {_children}")
 
     # --- UI Update Methods ---
     def safe_update_status(self, msg):
@@ -149,6 +270,13 @@ class CNCApp(tk.Tk):
         self.subtitle_choice = ttk.Combobox(self.main_frame, values=subtitle_options, state="readonly")
         self.subtitle_choice.pack(fill="x")
         self.subtitle_choice.current(0)
+
+        #Polyglot V enable toggle (same page, same style)
+        ttk.Label(self.main_frame, text="Jack in V’s Polyglot shard?\n(Enables V to speak different languages depending on the interlocutor)").pack(anchor="w", pady=(12, 0))
+        self.polyglot_choice = ttk.Combobox(self.main_frame, values=["Yes", "No"], state="readonly")
+        self.polyglot_choice.pack(fill="x")
+        self.polyglot_choice.current(0)  # default: Yes
+
         ttk.Button(self.main_frame, text="START", command=self.next_step).pack(pady=10)
         
         # Steps frame
@@ -196,11 +324,153 @@ class CNCApp(tk.Tk):
         self.quit()
 
     # --- Step B: Language & NPC Selection ---
+    def rebuild_character_flow(self):
+        """Recompute character order & dependencies based on self.polyglot_enabled."""
+        from collections import defaultdict
+        self.character_order = []
+        self.dependency_map = defaultdict(list)
+
+        for key, info in self.npc_info.items():
+            # Hide polyglot entries entirely when disabled
+            if (not getattr(self, "polyglot_enabled", False)) and is_polyglot_key(key):
+                continue
+
+            if not isinstance(info, dict):
+                self.character_order.append(key)
+                continue
+
+            req = str(info.get("requirement", "No")).strip()
+            if req.lower() == "no":
+                self.character_order.append(key)
+            else:
+                self.dependency_map[req].append(key)
+
+    # --- Polyglot V per-language dialog ---
+    def polyglot_per_language_dialog(self):
+        """
+        Show a small dialog to choose VA/AIUS per language for Polyglot V.
+        Returns a dict like {"jp":"AIUS", "es":"VA", ...}
+        """
+        # Defaults: AIUS for all
+        selection_map = {lang: "AIUS" for lang in POLYGLOT_LANGS}
+
+        # Try to prefill from a previous run config if present
+        try:
+            prev_cfg_path = os.path.join(BASE_DIR, "resources", "config_diy.json")
+            if os.path.exists(prev_cfg_path):
+                prev_cfg = load_json(prev_cfg_path)
+                if isinstance(prev_cfg, dict) and isinstance(prev_cfg.get("polyglot_map"), dict):
+                    for k, v in prev_cfg["polyglot_map"].items():
+                        if k in selection_map and v in ("VA", "AIUS"):
+                            selection_map[k] = v
+        except Exception:
+            logging.exception("Failed to load previous polyglot_map")
+
+        # Toplevel UI
+        dlg = tk.Toplevel(self)
+        dlg.title("Polyglot V – Select V’s voice source per language")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        ttk.Label(dlg, text="AIUS: AI-generated voice matching V’s English VO.\nVA: Original voices of V’s actors.", padding=12).pack(anchor="w")
+
+        vars_by_lang = {}
+        container = ttk.Frame(dlg, padding=(12, 0, 12, 12))
+        container.pack(fill="both", expand=True)
+
+        for code in POLYGLOT_LANGS:
+            row = ttk.Frame(container)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=f"{POLYGLOT_LABELS[code]} [{code.upper()}]", width=24).pack(side="left")
+            v = tk.StringVar(value=selection_map[code])
+            vars_by_lang[code] = v
+            ttk.Radiobutton(row, text="VA", value="VA", variable=v).pack(side="left", padx=(10, 6))
+            ttk.Radiobutton(row, text="AIUS", value="AIUS", variable=v).pack(side="left")
+
+        btns = ttk.Frame(dlg)
+        btns.pack(fill="x", pady=(8, 12))
+
+        result = {"value": None}
+
+        def on_ok():
+            sel = {code: vars_by_lang[code].get() for code in POLYGLOT_LANGS}
+            result["value"] = sel
+            dlg.destroy()
+
+        ttk.Button(btns, text="OK", command=on_ok).pack(side="right", padx=(6, 12))
+
+        def _on_close():
+            # Keep defaults if closed
+            result["value"] = {code: vars_by_lang[code].get() for code in POLYGLOT_LANGS}
+            dlg.destroy()
+        dlg.protocol("WM_DELETE_WINDOW", _on_close)
+
+        dlg.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() // 2) - (dlg.winfo_width() // 2)
+        y = self.winfo_rooty() + (self.winfo_height() // 2) - (dlg.winfo_height() // 2)
+        dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+        dlg.wait_window()
+        return result["value"] or selection_map
+
+    def apply_polyglot_assets_by_language(self, selection_map: dict):
+        """Copy only the per-language Polyglot V assets into files/wem/** respecting tree."""
+        try:
+            if not selection_map:
+                self.safe_add_step("Polyglot V: no per-language selection provided; skipped.")
+                return
+
+            for code in POLYGLOT_LANGS:
+                choice = selection_map.get(code, "AIUS")
+                pack = "files-ai" if choice == "AIUS" else "files-va"
+
+                # CDT
+                src_cdt = os.path.join(RES_DIR, "PV", pack, "wem", "cdt", "pv", code)
+                dst_cdt = os.path.join("files", "wem", "cdt", "pv", code)
+                if os.path.exists(src_cdt):
+                    self.copy_files(src_cdt, dst_cdt)
+                else:
+                    logging.warning(f"Polyglot V source not found: {src_cdt}")
+
+                # CNC
+                src_cnc = os.path.join(RES_DIR, "PV", pack, "wem", "cnc", "pv", code)
+                dst_cnc = os.path.join("files", "wem", "cnc", "pv", code)
+                if os.path.exists(src_cnc):
+                    self.copy_files(src_cnc, dst_cnc)
+                else:
+                    logging.warning(f"Polyglot V source not found: {src_cnc}")
+
+            # Persist selection for sticky UX
+            self.config_data["polyglot_map"] = {code: selection_map.get(code, "AIUS") for code in POLYGLOT_LANGS}
+            badge = " ".join([f"{c.upper()}={self.config_data['polyglot_map'][c]}" for c in POLYGLOT_LANGS])
+            self.safe_add_step(f"Polyglot V applied: {badge}")
+        except Exception:
+            logging.error("Failed to apply per-language Polyglot V assets", exc_info=True)
+            messagebox.showerror("Polyglot V", "Failed to apply Polyglot V assets. Check the log for details.")
+
     def next_step(self):
         try:
             self.config_data["audio_language"] = self.audio_choice.get()
             self.config_data["subtitle_language"] = self.subtitle_choice.get()
+
+            # Handle language files first
             self.handle_language_files(self.config_data["audio_language"], self.config_data["subtitle_language"])
+
+            # Read Polyglot enable from combobox (same page UX)
+            self.polyglot_enabled = (self.polyglot_choice.get() == "Yes")
+            self.config_data["polyglot_enabled"] = bool(self.polyglot_enabled)
+
+            if self.polyglot_enabled:
+                # Small dialog to choose per-language VA/AIUS
+                selection_map = self.polyglot_per_language_dialog()
+                self.apply_polyglot_assets_by_language(selection_map)
+            else:
+                self.safe_add_step("Polyglot V: disabled.")
+
+            # Rebuild character order/dependencies now that polyglot_enabled is known
+            self.rebuild_character_flow()
+
             self.safe_add_step("Audio language selected.")
             self.safe_add_step("Subtitles language selected.")
 
@@ -209,13 +479,44 @@ class CNCApp(tk.Tk):
             logging.error("Error in next step", exc_info=True)
             messagebox.showerror("Error", "An error occurred while proceeding to the next step. Check the log for details.")
 
+    def prev_character(self, npc, choice, index):
+        try:
+            # Save current selection so latest choice is kept
+            user_choice = bool(choice.get())
+            self.config_data[npc] = user_choice
+
+            # If parent is turned OFF, remove its dependants from the flow and clear their answers
+            if not user_choice:
+                dependants = self.dependency_map.get(npc, [])
+                if dependants:
+                    # remove in reverse order to keep indices stable
+                    for dep_key in reversed(dependants):
+                        if dep_key in self.character_order:
+                            try:
+                                self.character_order.remove(dep_key)
+                            except ValueError:
+                                pass
+                        # Also clear any previously saved answer so save_configuration will set False
+                        if dep_key in self.config_data:
+                            self.config_data.pop(dep_key, None)
+
+            # Go back one step
+            new_index = max(0, index - 1)
+            self.character_selection(new_index)
+        except Exception:
+            logging.error("Error in prev_character", exc_info=True)
+            messagebox.showerror("Error", "Failed to go to previous NPC. Check the log for details.")
+
+
+
     def character_selection(self, index=0):
         for widget in self.main_frame.winfo_children():
             widget.destroy()
-        characters = list(self.npc_info.keys())
+        characters = self.character_order
         if index < len(characters):
             npc = characters[index]
             info = self.npc_info[npc]
+            existing_choice = self.config_data.get(npc)
             # Description
             desc_box = tk.Text(
                 self.main_frame,
@@ -250,28 +551,52 @@ class CNCApp(tk.Tk):
             # Check
             if self.config_data["audio_language"] != "ALL" and info["language"] == self.config_data["audio_language"]:
                 ttk.Label(self.main_frame, text="Not selectable (identical audio language)").pack(anchor="w", pady=5)
-                choice = tk.BooleanVar(value=False)
+                choice = tk.BooleanVar(value=False if existing_choice is None else bool(existing_choice))
                 ttk.Radiobutton(self.main_frame, text="Yes", variable=choice, value=True, state="disabled").pack(anchor="w")
                 ttk.Radiobutton(self.main_frame, text="No", variable=choice, value=False, state="disabled").pack(anchor="w")
             else:
-                choice = tk.BooleanVar(value=True)
+                choice = tk.BooleanVar(value=True if existing_choice is None else bool(existing_choice))
                 ttk.Radiobutton(self.main_frame, text="Yes", variable=choice, value=True).pack(anchor="w")
                 ttk.Radiobutton(self.main_frame, text="No", variable=choice, value=False).pack(anchor="w")
 
             # Next
-            ttk.Button(self.main_frame, text="Next", command=lambda: self.next_character(npc, choice, index)).pack(pady=10)
+            btns = ttk.Frame(self.main_frame)
+            btns.pack(pady=10)
+            if index > 0:
+                ttk.Button(btns, text="Back", command=lambda: self.prev_character(npc, choice, index)).pack(side="left", padx=5)
+            ttk.Button(btns, text="Next", command=lambda: self.next_character(npc, choice, index)).pack(side="left", padx=5)
         else:
             self.safe_add_step("NPCs selection completed.")
             self.save_configuration()
 
     def next_character(self, npc, choice, index):
-        self.config_data[npc] = choice.get()
+        # Enregistrer le choix utilisateur
+        user_choice = bool(choice.get())
+        self.config_data[npc] = user_choice
+        
+        # Si OUI, révéler immédiatement les entrées dont requirement == npc
+        dependants = self.dependency_map.get(npc, []) if user_choice else []
+        if dependants:
+            insert_at = index + 1  # juste après l'item courant
+            for dep_key in dependants:
+                if dep_key in self.npc_info and dep_key not in self.character_order:
+                    self.character_order.insert(insert_at, dep_key)
+                    insert_at += 1
+        
+        # Poursuivre le flux (affichage de l'écran suivant)
         self.character_selection(index + 1)
 
+
     def save_configuration(self):
+        # S'assurer que toutes les clés existent dans la config finale (False par défaut)
+        for _npc_key in self.npc_info.keys():
+            if _npc_key not in self.config_data:
+                self.config_data[_npc_key] = False
         try:
             config_path = os.path.join(BASE_DIR, "resources", "config_diy.json")
             os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            self.config_data.setdefault("polyglot_enabled", False)
+            self.config_data.setdefault("polyglot_map", {"jp":"AIUS","es":"AIUS","cn":"AIUS","kr":"AIUS","fr":"AIUS","br":"AIUS"})
             save_json(config_path, self.config_data)
             logging.info("Configuration saved successfully.")
             messagebox.showinfo("Selection Finished.", "Configuration saved successfully.")
@@ -281,10 +606,20 @@ class CNCApp(tk.Tk):
             messagebox.showerror("Error", "Failed to save configuration. Check the log for details.")
 
     def load_image(self, npc_name):
-        image_path = os.path.join("res", "xomod", f"{npc_name}.png")
-        if os.path.exists(image_path):
-            image = Image.open(image_path).resize((200, 200))
-            return ImageTk.PhotoImage(image)
+        base_dir = os.path.join("res", "xomod")
+        candidates = []
+        lang = polyglot_lang_key(npc_name)
+        if lang:
+            candidates.extend([
+                f"PolyglotV_{lang}.png",   # ex: PolyglotV_spanish.png
+                f"polyglotv_{lang}.png",   # ex: polyglotv_spanish.png
+            ])
+        candidates.append(f"{npc_name}.png")
+        for filename in candidates:
+            image_path = os.path.join(base_dir, filename)
+            if os.path.exists(image_path):
+                image = Image.open(image_path).resize((200, 200))
+                return ImageTk.PhotoImage(image)
         return None
 
     # --- Step C: Language Files Handling ---
@@ -392,8 +727,8 @@ class CNCApp(tk.Tk):
             if os.path.exists(cvlpv_id_path):
                 try:
                     id_data_extra = load_json(cvlpv_id_path)
-                    id_data.update(id_data_extra)
-                    logging.info("CVLPV_id_info.json loaded and merged successfully.")
+                    id_data = merge_id_lists_union(id_data, id_data_extra)
+                    logging.info("CVLPV_id_info.json merged with union by global ID (CNC priority).")
                 except Exception as e:
                     logging.error("Failed to load CVLPV_id_info.json", exc_info=True)
 
@@ -410,8 +745,8 @@ class CNCApp(tk.Tk):
             if os.path.exists(cvlpv_cdt_path):
                 try:
                     cdt_data_extra = load_json(cvlpv_cdt_path)
-                    cdt_data.update(cdt_data_extra)
-                    logging.info("CVLPV_cdt_data.json loaded and merged successfully.")
+                    cdt_data = merge_keep_base(cdt_data, cdt_data_extra)
+                    logging.info("CVLPV_cdt_data.json merged as union (CNC priority).")
                 except Exception as e:
                     logging.error("Failed to load CVLPV_cdt_data.json", exc_info=True)
 
@@ -428,8 +763,8 @@ class CNCApp(tk.Tk):
             if os.path.exists(cvlpv_cnc_path):
                 try:
                     cnc_data_extra = load_json(cvlpv_cnc_path)
-                    cnc_data.update(cnc_data_extra)
-                    logging.info("CVLPV_cnc_data.json loaded and merged successfully.")
+                    cnc_data = merge_keep_base(cnc_data, cnc_data_extra)
+                    logging.info("CVLPV_cnc_data.json merged as union (CNC priority).")
                 except Exception as e:
                     logging.error("Failed to load CVLPV_cnc_data.json", exc_info=True)
 
