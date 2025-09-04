@@ -38,7 +38,7 @@ language_codes = {
     "Traditional Chinese": ("ZH", "zh-tw")
 }
 
-# --- PV Variables ---
+# --- PV/CVL Variables ---
 POLYGLOT_LANGS = ["jp", "es", "cn", "kr", "fr", "br"]
 POLYGLOT_LABELS = {
     "jp": "Japanese",
@@ -48,6 +48,15 @@ POLYGLOT_LABELS = {
     "fr": "French",
     "br": "Brazilian"
 }
+LANG_TO_PV_CODE = {
+    "Japanese": "jp",
+    "Spanish": "es",
+    "Chinese": "cn",
+    "Korean":  "kr",
+    "French":  "fr",
+    "Brazilian": "br",
+}
+
 
 
 def is_polyglot_key(npc_key: str) -> bool:
@@ -99,60 +108,23 @@ def save_json(filepath, data):
         raise
 
 
-# --- Merge helpers (CNC priority) ---
-def merge_keep_base(base: dict, extra: dict) -> dict:
-    """
-    Union of dictionaries with priority to 'base' (CNC):
-    - Adds only missing keys from 'extra' into 'base'.
-    - Shared keys keep the 'base' value.
-    """
-    if not isinstance(base, dict) or not isinstance(extra, dict):
-        return base
-    for k, v in extra.items():
-        if k not in base:
-            base[k] = v
-    return base
+# --- Merge helpers ---
 
 def merge_id_lists_union(base: dict, extra: dict) -> dict:
-    """
-    Union by GLOBAL ID for the mapping NPC -> {"Ids":[...]}:
-    - Build a set of all IDs already present in 'base' (across all NPCs).
-    - For each NPC in 'extra', only add IDs that are absent globally.
-    - If the NPC exists in 'base': extend its 'Ids' list with these new IDs (no duplicates).
-    - If the NPC does not exist: create it with only these new IDs.
-    This ensures CNC keeps precedence for common IDs even when NPC names differ.
-    """
+
     if not isinstance(base, dict) or not isinstance(extra, dict):
         return base
-
-    # Collect all IDs present in base globally
-    present_ids = set()
-    try:
-        for payload in base.values():
-            ids = payload.get("Ids", []) if isinstance(payload, dict) else []
-            for x in ids:
-                present_ids.add(x)
-    except Exception:
-        logging.exception("Failed to scan base id_data for existing IDs")
-
     for npc, payload in extra.items():
         try:
             extra_ids = payload.get("Ids", []) if isinstance(payload, dict) else []
-            to_add = [x for x in extra_ids if x not in present_ids]
-            if not to_add:
-                continue
-            if npc in base and isinstance(base[npc], dict):
-                base_ids = base[npc].setdefault("Ids", [])
-                seen_local = set(base_ids)
-                for x in to_add:
-                    if x not in seen_local:
-                        base_ids.append(x)
-                        seen_local.add(x)
-            else:
-                new_payload = dict(payload) if isinstance(payload, dict) else {}
-                new_payload["Ids"] = to_add
-                base[npc] = new_payload
-            present_ids.update(to_add)
+            # crée l'entrée npc si absente
+            base_payload = base.setdefault(npc, {})
+            base_ids = base_payload.setdefault("Ids", [])
+            seen = set(base_ids)
+            for x in extra_ids:
+                if x not in seen:
+                    base_ids.append(x)
+                    seen.add(x)
         except Exception:
             logging.exception(f"Skipping malformed id_info entry for NPC: {npc}")
     return base
@@ -179,6 +151,9 @@ class CNCApp(tk.Tk):
             logging.error("Failed to load CNC_npc_info.json", exc_info=True)
             messagebox.showerror("Error", "Failed to load NPC info. Check the log for details.")
             self.quit()
+        
+        # "V's native language"
+        self.v_native_language = None
 
         # "CVLPV_npc_info.json"
         cvlpv_path = os.path.join(RES_DIR, "CVLPV_npc_info.json")
@@ -187,25 +162,46 @@ class CNCApp(tk.Tk):
                 npc_info_extra = load_json(cvlpv_path)
                 self.npc_info.update(npc_info_extra)
                 logging.info("CVLPV_npc_info.json loaded and merged successfully.")
+
+
+                # Detect CVL
+                try:
+                    v_info = npc_info_extra.get("V") if isinstance(npc_info_extra, dict) else None
+                    if isinstance(v_info, dict) and isinstance(v_info.get("language"), str):
+                        self.v_native_language = v_info["language"]
+                        logging.info(f"Detected V native language from CVLPV: {self.v_native_language}")
+
+                        #combobox CVL
+                        try:
+                            self.cvlpv_choice.configure(
+                                state="readonly",
+                                values=["No", f"Yes — {self.v_native_language}"]
+                            )
+                            self.cvlpv_choice.current(1)
+                        except Exception:
+                            logging.exception("Failed to initialize CVLPV combobox")
+                        self.polyglot_enabled = (self.polyglot_choice.get() == "Yes")
+                        self.rebuild_character_flow()
+
+                    else:
+                        try:
+                            self.cvlpv_choice.configure(state="disabled", values=["No — not detected"])
+                            self.cvlpv_choice.current(0)
+                        except Exception:
+                            logging.exception("Failed to initialize CVLPV combobox (not detected)")
+                except Exception:
+                    logging.exception("Failed to detect V's native language from CVLPV_npc_info.json")
+
+
             except Exception as e:
                 logging.error("Failed to load CVLPV_npc_info.json", exc_info=True)
 
-        # A first pass to build requirement map; we will rebuild after user toggles Polyglot
-        from collections import defaultdict
-        self.character_order = []
-        self.dependency_map = defaultdict(list)
-        for _key, _info in self.npc_info.items():
-            if not isinstance(_info, dict):
-                self.character_order.append(_key)
-                continue
-            _req = str(_info.get("requirement", "No")).strip()
-            if _req.lower() == "no":
-                self.character_order.append(_key)
-            else:
-                self.dependency_map[_req].append(_key)
-        for _parent, _children in list(self.dependency_map.items()):
-            if _parent not in self.npc_info:
-                logging.warning(f"[requirement] Clé parent inconnue: '{_parent}' pour {_children}")
+
+        if "polyglot_enabled" not in self.__dict__:
+            self.polyglot_enabled = (self.polyglot_choice.get() == "Yes")
+            self.rebuild_character_flow() 
+
+
 
     # --- UI Update Methods ---
     def safe_update_status(self, msg):
@@ -271,7 +267,21 @@ class CNCApp(tk.Tk):
         self.subtitle_choice.pack(fill="x")
         self.subtitle_choice.current(0)
 
-        #Polyglot V enable toggle (same page, same style)
+        #CVLPV native language choice
+        ttk.Label(
+            self.main_frame,
+            text="Does V speak a foreign native language ?\n(Lets you change V’s native language; requires downloading a 'DIY extension' from Optional Files.)"
+        ).pack(anchor="w", pady=(12, 0))
+
+        self.cvlpv_choice = ttk.Combobox(
+            self.main_frame,
+            values=["No — not detected"],
+            state="disabled"
+        )
+        self.cvlpv_choice.pack(fill="x")
+        self.cvlpv_choice.current(0)
+
+        #Polyglot V enable toggle 
         ttk.Label(self.main_frame, text="Jack in V’s Polyglot shard?\n(Enables V to speak different languages depending on the interlocutor)").pack(anchor="w", pady=(12, 0))
         self.polyglot_choice = ttk.Combobox(self.main_frame, values=["Yes", "No"], state="readonly")
         self.polyglot_choice.pack(fill="x")
@@ -330,10 +340,16 @@ class CNCApp(tk.Tk):
         self.character_order = []
         self.dependency_map = defaultdict(list)
 
+        v_native = getattr(self, "v_native_language", None)
+
         for key, info in self.npc_info.items():
-            # Hide polyglot entries entirely when disabled
             if (not getattr(self, "polyglot_enabled", False)) and is_polyglot_key(key):
                 continue
+
+            if is_polyglot_key(key) and isinstance(info, dict) and v_native:
+                if info.get("language") == v_native:  # comparaison stricte (pas de normalisation)
+                    logging.info(f"Skipping PolyglotV entry for V-native language: {key}")
+                    continue
 
             if not isinstance(info, dict):
                 self.character_order.append(key)
@@ -346,15 +362,26 @@ class CNCApp(tk.Tk):
                 self.dependency_map[req].append(key)
 
     # --- Polyglot V per-language dialog ---
+   
     def polyglot_per_language_dialog(self):
         """
         Show a small dialog to choose VA/AIUS per language for Polyglot V.
         Returns a dict like {"jp":"AIUS", "es":"VA", ...}
         """
-        # Defaults: AIUS for all
-        selection_map = {lang: "AIUS" for lang in POLYGLOT_LANGS}
+        # Si CVLPV = Yes, on exclut la langue native de V
+        excluded_code = None
+        try:
+            if self.config_data.get("cvlpv_mode") == "yes" and isinstance(self.v_native_language, str):
+                excluded_code = LANG_TO_PV_CODE.get(self.v_native_language)
+        except Exception:
+            excluded_code = None
 
-        # Try to prefill from a previous run config if present
+        # Defaults: AIUS for all visibles (hors langue native si exclue)
+        visible_langs = [code for code in POLYGLOT_LANGS if code != excluded_code]
+        logging.info(f"Polyglot dialog – excluded_code={excluded_code}, visible={visible_langs}")
+        selection_map = {lang: "AIUS" for lang in visible_langs}
+
+        # Préremplissage depuis éventuelle ancienne config
         try:
             prev_cfg_path = os.path.join(BASE_DIR, "resources", "config_diy.json")
             if os.path.exists(prev_cfg_path):
@@ -366,20 +393,25 @@ class CNCApp(tk.Tk):
         except Exception:
             logging.exception("Failed to load previous polyglot_map")
 
-        # Toplevel UI
+
+        # Toplevel UI (modale, visible, centrée, focus)
         dlg = tk.Toplevel(self)
         dlg.title("Polyglot V – Select V’s voice source per language")
         dlg.transient(self)
-        dlg.grab_set()
         dlg.resizable(False, False)
 
-        ttk.Label(dlg, text="AIUS: AI-generated voice matching V’s English VO.\nVA: Original voices of V’s actors.", padding=12).pack(anchor="w")
+        # Texte explicatif
+        ttk.Label(
+            dlg,
+            text="AIUS: AI-generated voice matching V’s English VO.\nVA: Original voices of V’s actors.",
+            padding=12
+        ).pack(anchor="w")
 
         vars_by_lang = {}
         container = ttk.Frame(dlg, padding=(12, 0, 12, 12))
         container.pack(fill="both", expand=True)
 
-        for code in POLYGLOT_LANGS:
+        for code in visible_langs:
             row = ttk.Frame(container)
             row.pack(fill="x", pady=2)
             ttk.Label(row, text=f"{POLYGLOT_LABELS[code]} [{code.upper()}]", width=24).pack(side="left")
@@ -394,25 +426,39 @@ class CNCApp(tk.Tk):
         result = {"value": None}
 
         def on_ok():
-            sel = {code: vars_by_lang[code].get() for code in POLYGLOT_LANGS}
+            sel = {code: vars_by_lang[code].get() for code in visible_langs}
             result["value"] = sel
             dlg.destroy()
 
         ttk.Button(btns, text="OK", command=on_ok).pack(side="right", padx=(6, 12))
 
         def _on_close():
-            # Keep defaults if closed
-            result["value"] = {code: vars_by_lang[code].get() for code in POLYGLOT_LANGS}
+            # Conserver les valeurs par défaut si l’utilisateur ferme la fenêtre (X)
+            result["value"] = {code: vars_by_lang[code].get() for code in visible_langs}
             dlg.destroy()
         dlg.protocol("WM_DELETE_WINDOW", _on_close)
 
+        # ---- Séquence clef pour Windows : rendre visible, topmost, focus, et bloquer proprement
+        dlg.withdraw()
         dlg.update_idletasks()
+
+        # Centrage
         x = self.winfo_rootx() + (self.winfo_width() // 2) - (dlg.winfo_width() // 2)
         y = self.winfo_rooty() + (self.winfo_height() // 2) - (dlg.winfo_height() // 2)
         dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
 
-        dlg.wait_window()
+        dlg.lift()
+        dlg.attributes("-topmost", True)   # passe au-dessus
+        dlg.deiconify()
+        dlg.grab_set()                      # modal
+        dlg.focus_force()
+        dlg.wait_visibility()               # s’assurer qu’elle est VISIBLE
+        dlg.attributes("-topmost", False)   # on rend le topmost temporaire
+
+        dlg.wait_window()                   # bloque VRAIMENT tant que la fenêtre n’est pas fermée
+
         return result["value"] or selection_map
+    
 
     def apply_polyglot_assets_by_language(self, selection_map: dict):
         """Copy only the per-language Polyglot V assets into files/wem/** respecting tree."""
@@ -421,10 +467,20 @@ class CNCApp(tk.Tk):
                 self.safe_add_step("Polyglot V: no per-language selection provided; skipped.")
                 return
 
-            for code in POLYGLOT_LANGS:
-                choice = selection_map.get(code, "AIUS")
-                pack = "files-ai" if choice == "AIUS" else "files-va"
+            excluded_code = None
+            try:
+                if self.config_data.get("cvlpv_mode") == "yes" and isinstance(self.v_native_language, str):
+                    excluded_code = LANG_TO_PV_CODE.get(self.v_native_language)
+            except Exception:
+                excluded_code = None
 
+            for code in POLYGLOT_LANGS:
+                if excluded_code and code == excluded_code:
+                    logging.info(f"Polyglot V: skipping native language '{code.upper()}' (handled by CVLPV).")
+                    continue
+
+                choice = selection_map.get(code, "AIUS")  # les langues non visibles n’ont pas d’entrée -> "AIUS" par défaut, mais on ne passe jamais ici si exclues
+                pack = "files-ai" if choice == "AIUS" else "files-va"
                 # CDT
                 src_cdt = os.path.join(RES_DIR, "PV", pack, "wem", "cdt", "pv", code)
                 dst_cdt = os.path.join("files", "wem", "cdt", "pv", code)
@@ -432,7 +488,6 @@ class CNCApp(tk.Tk):
                     self.copy_files(src_cdt, dst_cdt)
                 else:
                     logging.warning(f"Polyglot V source not found: {src_cdt}")
-
                 # CNC
                 src_cnc = os.path.join(RES_DIR, "PV", pack, "wem", "cnc", "pv", code)
                 dst_cnc = os.path.join("files", "wem", "cnc", "pv", code)
@@ -442,7 +497,11 @@ class CNCApp(tk.Tk):
                     logging.warning(f"Polyglot V source not found: {src_cnc}")
 
             # Persist selection for sticky UX
-            self.config_data["polyglot_map"] = {code: selection_map.get(code, "AIUS") for code in POLYGLOT_LANGS}
+            excluded_code = LANG_TO_PV_CODE.get(self.v_native_language) if self.config_data.get("cvlpv_mode") == "yes" else None
+            self.config_data["polyglot_map"] = {
+                code: ("NATIVE" if excluded_code and code == excluded_code else selection_map.get(code, "AIUS"))
+                for code in POLYGLOT_LANGS
+            }
             badge = " ".join([f"{c.upper()}={self.config_data['polyglot_map'][c]}" for c in POLYGLOT_LANGS])
             self.safe_add_step(f"Polyglot V applied: {badge}")
         except Exception:
@@ -456,6 +515,26 @@ class CNCApp(tk.Tk):
 
             # Handle language files first
             self.handle_language_files(self.config_data["audio_language"], self.config_data["subtitle_language"])
+
+            # --- Read CVLPV choice (hard-ignore support) ---
+            label = None
+            try:
+                label = self.cvlpv_choice.get()
+            except Exception:
+                label = "No — not detected"
+
+            use_cvlpv = isinstance(label, str) and label.startswith("Yes — ")
+            if use_cvlpv:
+                chosen_lang = label.split("Yes — ", 1)[1].strip()
+                self.config_data["cvlpv_mode"] = "yes"
+                self.config_data["cvlpv_language"] = chosen_lang
+                self.v_native_language = chosen_lang
+                self.safe_add_step(f"Change V's native language into: {chosen_lang}.")
+            else:
+                self.config_data["cvlpv_mode"] = "no"
+                self.config_data["cvlpv_language"] = None
+                self.v_native_language = None
+                self.safe_add_step("Dont change V's native language.")
 
             # Read Polyglot enable from combobox (same page UX)
             self.polyglot_enabled = (self.polyglot_choice.get() == "Yes")
@@ -548,16 +627,25 @@ class CNCApp(tk.Tk):
                 ttk.Label(self.main_frame, image=npc_image).pack(pady=5)
                 ttk.Button(self.main_frame, text="🔊 Audio Preview", command=lambda: self.play_npc_preview(npc)).pack(pady=5)
 
+
             # Check
-            if self.config_data["audio_language"] != "ALL" and info["language"] == self.config_data["audio_language"]:
+            if npc == "V" and self.config_data.get("cvlpv_mode") in ("yes", "no"):
+                locked = (self.config_data.get("cvlpv_mode") == "yes")  # yes -> True, no -> False
+                choice = tk.BooleanVar(value=locked)
+                ttk.Radiobutton(self.main_frame, text="Yes", variable=choice, value=True, state="disabled").pack(anchor="w")
+                ttk.Radiobutton(self.main_frame, text="No",  variable=choice, value=False, state="disabled").pack(anchor="w")
+
+            elif self.config_data["audio_language"] != "ALL" and info["language"] == self.config_data["audio_language"]:
                 ttk.Label(self.main_frame, text="Not selectable (identical audio language)").pack(anchor="w", pady=5)
                 choice = tk.BooleanVar(value=False if existing_choice is None else bool(existing_choice))
                 ttk.Radiobutton(self.main_frame, text="Yes", variable=choice, value=True, state="disabled").pack(anchor="w")
-                ttk.Radiobutton(self.main_frame, text="No", variable=choice, value=False, state="disabled").pack(anchor="w")
+                ttk.Radiobutton(self.main_frame, text="No",  variable=choice, value=False, state="disabled").pack(anchor="w")
+
             else:
                 choice = tk.BooleanVar(value=True if existing_choice is None else bool(existing_choice))
                 ttk.Radiobutton(self.main_frame, text="Yes", variable=choice, value=True).pack(anchor="w")
-                ttk.Radiobutton(self.main_frame, text="No", variable=choice, value=False).pack(anchor="w")
+                ttk.Radiobutton(self.main_frame, text="No",  variable=choice, value=False).pack(anchor="w")
+
 
             # Next
             btns = ttk.Frame(self.main_frame)
@@ -713,6 +801,7 @@ class CNCApp(tk.Tk):
             # Configuration
             config_path = os.path.join(BASE_DIR, "resources", "config_diy.json")
             self.config_data = load_json(config_path)
+            use_cvlpv = (self.config_data.get("cvlpv_mode") == "yes")
 
             # 1. INFOS
             try:
@@ -723,59 +812,96 @@ class CNCApp(tk.Tk):
                 messagebox.showerror("Error", "Failed to load ID info. Check the log for details.")
                 self.quit()
 
+
             cvlpv_id_path = os.path.join(RES_DIR, "CVLPV_id_info.json")
-            if os.path.exists(cvlpv_id_path):
+            if use_cvlpv and os.path.exists(cvlpv_id_path):
                 try:
                     id_data_extra = load_json(cvlpv_id_path)
                     id_data = merge_id_lists_union(id_data, id_data_extra)
-                    logging.info("CVLPV_id_info.json merged with union by global ID (CNC priority).")
+                    logging.info("CVLPV_id_info.json merged (per-NPC union; CNC kept; duplicates allowed across NPCs)")
                 except Exception as e:
                     logging.error("Failed to load CVLPV_id_info.json", exc_info=True)
+            else:
+                logging.info("CVLPV hard-ignored: skipping CVLPV_id_info.json")
+
+
 
             # 2. CDT
-            try:
-                cdt_data = load_json(os.path.join(RES_DIR, "CNC_cdt_data.json"))
-                logging.info("CNC_cdt_data.json loaded successfully.")
-            except Exception as e:
-                logging.error("Failed to load CNC_cdt_data.json", exc_info=True)
-                messagebox.showerror("Error", "Failed to load CDT data. Check the log for details.")
-                self.quit()
+            cdt_data = load_json(os.path.join(RES_DIR, "CNC_cdt_data.json"))
+            logging.info("CNC_cdt_data.json loaded successfully.")
 
+            cvlpv_cdt_data = {}
             cvlpv_cdt_path = os.path.join(RES_DIR, "CVLPV_cdt_data.json")
-            if os.path.exists(cvlpv_cdt_path):
-                try:
-                    cdt_data_extra = load_json(cvlpv_cdt_path)
-                    cdt_data = merge_keep_base(cdt_data, cdt_data_extra)
-                    logging.info("CVLPV_cdt_data.json merged as union (CNC priority).")
-                except Exception as e:
-                    logging.error("Failed to load CVLPV_cdt_data.json", exc_info=True)
+            if use_cvlpv and os.path.exists(cvlpv_cdt_path):
+                cvlpv_cdt_data = load_json(cvlpv_cdt_path)
+                logging.info("CVLPV_cdt_data.json loaded (kept separate).")
+            else:
+                logging.info("CVLPV hard-ignored: skipping CVLPV_cdt_data.json")
 
-            # 3. CNC
-            try:
-                cnc_data = load_json(os.path.join(RES_DIR, "CNC_cnc_data.json"))
-                logging.info("CNC_cnc_data.json loaded successfully.")
-            except Exception as e:
-                logging.error("Failed to load CNC_cnc_data.json", exc_info=True)
-                messagebox.showerror("Error", "Failed to load CNC data. Check the log for details.")
-                self.quit()
+            # 3. CNC 
+            cnc_data = load_json(os.path.join(RES_DIR, "CNC_cnc_data.json"))
+            logging.info("CNC_cnc_data.json loaded successfully.")
 
+            cvlpv_cnc_data = {}
             cvlpv_cnc_path = os.path.join(RES_DIR, "CVLPV_cnc_data.json")
-            if os.path.exists(cvlpv_cnc_path):
-                try:
-                    cnc_data_extra = load_json(cvlpv_cnc_path)
-                    cnc_data = merge_keep_base(cnc_data, cnc_data_extra)
-                    logging.info("CVLPV_cnc_data.json merged as union (CNC priority).")
-                except Exception as e:
-                    logging.error("Failed to load CVLPV_cnc_data.json", exc_info=True)
+            if use_cvlpv and os.path.exists(cvlpv_cnc_path):
+                cvlpv_cnc_data = load_json(cvlpv_cnc_path)
+                logging.info("CVLPV_cnc_data.json loaded (kept separate).")
+            else:
+                logging.info("CVLPV hard-ignored: skipping CVLPV_cnc_data.json")
 
 
-            # IDs       
-            selected_ids = []
+            # IDs   
+            selected_ids = set()
             for npc, selected in self.config_data.items():
                 if isinstance(selected, bool) and selected and npc in id_data:
-                    selected_ids.extend(id_data[npc]["Ids"])
-            filtered_cdt_data = {data_id: info for data_id, info in cdt_data.items() if data_id in selected_ids}
-            filtered_cnc_data = {data_id: info for data_id, info in cnc_data.items() if data_id in selected_ids}
+                    selected_ids.update(id_data[npc]["Ids"])
+
+            #IDs CVL
+            v_ids = set()
+            if bool(self.config_data.get("V")) and "V" in id_data:
+                v_ids.update(id_data["V"].get("Ids", []))
+
+            #IDs PV
+            polyglot_true_ids = set()
+            for npc, selected in self.config_data.items():
+                if isinstance(selected, bool) and selected and npc in id_data and is_polyglot_key(npc):
+                    polyglot_true_ids.update(id_data[npc].get("Ids", []))
+
+            #Filtered
+            filtered_cdt_data = {}
+            filtered_cnc_data = {}
+
+            for data_id in selected_ids:
+                # Source par défaut : CNC
+                pick_from_cnc = True
+
+                # Si l'ID appartient à un PolyglotV activé -> CNC prime
+                if data_id in polyglot_true_ids:
+                    pick_from_cnc = True
+                # Sinon si l'ID est à V et CVLPV actif et l'ID existe côté CVLPV -> CVLPV prime
+                elif data_id in v_ids and use_cvlpv:
+                    if data_id in cvlpv_cnc_data or data_id in cvlpv_cdt_data:
+                        pick_from_cnc = False
+
+                if pick_from_cnc:
+                    if data_id in cnc_data:
+                        filtered_cnc_data[data_id] = cnc_data[data_id]
+                    if data_id in cdt_data:
+                        filtered_cdt_data[data_id] = cdt_data[data_id]
+                else:
+                    # CVLPV quand dispo, sinon fallback CNC (robustesse)
+                    if data_id in cvlpv_cnc_data:
+                        filtered_cnc_data[data_id] = cvlpv_cnc_data[data_id]
+                    elif data_id in cnc_data:
+                        filtered_cnc_data[data_id] = cnc_data[data_id]
+
+                    if data_id in cvlpv_cdt_data:
+                        filtered_cdt_data[data_id] = cvlpv_cdt_data[data_id]
+                    elif data_id in cdt_data:
+                        filtered_cdt_data[data_id] = cdt_data[data_id]
+
+            # Écriture en ressources
             save_json(os.path.join(BASE_DIR, "resources", "cdt.json"), filtered_cdt_data)
             save_json(os.path.join(BASE_DIR, "resources", "cnc.json"), filtered_cnc_data)
             self.safe_update_progress(10)
@@ -820,7 +946,6 @@ class CNCApp(tk.Tk):
             self.cleanup_intermediate_files()
             self.safe_add_step("Cleanup completed.")
             self.safe_update_progress(95)
-
 
             self.safe_add_step("All processing completed successfully!!!")
             self.safe_update_progress(100)
@@ -904,15 +1029,20 @@ class CNCApp(tk.Tk):
             config_data = load_json(config_diy_path)
             npc_list = [key for key, value in config_data.items() if isinstance(value, bool) and value]
             lipsync_data = load_json(cnc_lipsync_data_path)            
-            # CVLPL
+            use_cvlpv = (config_data.get("cvlpv_mode") == "yes")
+
+            # CVLPV lipsync (only if user kept CVLPV)
             cvlpv_lipsync_data_path = os.path.join(RES_DIR, "CVLPV_lipsync_data.json")
-            if os.path.exists(cvlpv_lipsync_data_path):
+            if use_cvlpv and os.path.exists(cvlpv_lipsync_data_path):
                 try:
                     cvlpv_lipsync_data = load_json(cvlpv_lipsync_data_path)
                     lipsync_data.update(cvlpv_lipsync_data)
                     logging.info("CVLPV_lipsync_data.json loaded and merged successfully.")
                 except Exception as e:
                     logging.error("Failed to load CVLPV_lipsync_data.json", exc_info=True)
+            else:
+                logging.info("CVLPV hard-ignored: skipping CVLPV_lipsync_data.json")
+
 
             filtered_data = {npc: paths for npc, paths in lipsync_data.items() if npc in npc_list}
             save_json(lipsync_output_path, filtered_data)
@@ -1397,3 +1527,6 @@ class CNCApp(tk.Tk):
 if __name__ == "__main__":
     app = CNCApp()
     app.mainloop()
+
+
+
