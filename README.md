@@ -100,6 +100,16 @@ Added a "Previous" button during NPC selection.
 
 
 
+v2.1
+
+Change V's native Language is now integrated by default into DIY-CNC; require to download one extension of your choice.
+
+Fix CVL - PV incompatibility bug.
+
+
+
+
+
 
 
 
